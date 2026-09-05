@@ -1,109 +1,459 @@
-import datetime
-
-import pandas as pd
-import plotly.express as px
-import requests
+```python
 import streamlit as st
-
-st.set_page_config(page_title="어제의 박스오피스", page_icon="🎬", layout="wide")
-
-# 인증키는 비밀 금고(secrets)에서 불러온다 — 코드에 직접 쓰지 않는다
-API_KEY = st.secrets["KOBIS_KEY"]
-URL = "https://www.kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json"
-
-# '어제'를 한국 시간 기준으로 계산한다 (배포 서버의 시계는 한국 시간이 아니다)
-KST = datetime.timezone(datetime.timedelta(hours=9))
-yesterday = datetime.datetime.now(KST).date() - datetime.timedelta(days=1)
-target_dt = yesterday.strftime("%Y%m%d")
+import requests
+import pandas as pd
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 
-@st.cache_data(ttl=3600)  # 같은 날짜는 한 시간 동안 기억해 두고 API를 다시 부르지 않는다
-def fetch_boxoffice(date_str):
-    """KOBIS API에서 해당 날짜의 일별 박스오피스를 받아 온다."""
-    params = {"key": API_KEY, "targetDt": date_str}
-    res = requests.get(URL, params=params, timeout=10)
-    res.raise_for_status()
-    return res.json()
+# --------------------------------------------------
+# 1. 페이지 설정
+# --------------------------------------------------
+
+st.set_page_config(
+    page_title="일일 박스오피스",
+    page_icon="🎬",
+    layout="wide"
+)
+
+st.title("🎬 일일 박스오피스")
 
 
-st.title("🎬 어제의 박스오피스")
-st.caption(f"조회 날짜: {yesterday} (한국 시간 기준 어제)")
+# --------------------------------------------------
+# 2. 한국 시간 기준 날짜 계산
+# --------------------------------------------------
 
-try:
-    data = fetch_boxoffice(target_dt)
-except requests.RequestException:
-    st.error("서버에 연결하지 못했습니다. 인터넷 연결을 확인하고 잠시 뒤 새로고침해 주세요.")
+korea_now = datetime.now(ZoneInfo("Asia/Seoul"))
+
+today = korea_now.date()
+yesterday = today - timedelta(days=1)
+
+
+# --------------------------------------------------
+# 3. 사이드바 설정
+# --------------------------------------------------
+
+st.sidebar.header("🔎 조회 설정")
+
+# 달력에서 날짜 선택
+selected_date = st.sidebar.date_input(
+    "조회 날짜",
+    value=yesterday,
+    max_value=yesterday
+)
+
+# 정렬 기준 선택
+sort_option = st.sidebar.selectbox(
+    "정렬 기준",
+    [
+        "순위순",
+        "관객수순",
+        "누적관객순",
+        "스크린수순"
+    ]
+)
+
+# 100만 관객 이상 영화만 볼지 선택
+million_only = st.sidebar.checkbox(
+    "🏆 100만 관객 이상만 보기"
+)
+
+
+# 선택한 날짜를 KOBIS API 형식으로 변환
+target_dt = selected_date.strftime("%Y%m%d")
+
+
+# --------------------------------------------------
+# 4. KOBIS API 호출
+# --------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def get_boxoffice(target_dt):
+
+    # Secrets에서 API 인증키를 가져옵니다.
+    api_key = st.secrets["KOBIS_KEY"]
+
+    url = (
+        "https://www.kobis.or.kr/"
+        "kobisopenapi/webservice/rest/boxoffice/"
+        "searchDailyBoxOfficeList.json"
+    )
+
+    params = {
+        "key": api_key,
+        "targetDt": target_dt
+    }
+
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            timeout=10
+        )
+
+        response.raise_for_status()
+        data = response.json()
+
+    except requests.RequestException as e:
+        return None, f"KOBIS API 요청에 실패했습니다.\n\n{e}"
+
+    except ValueError:
+        return None, "API에서 올바른 JSON 데이터를 받지 못했습니다."
+
+    # 인증키가 틀려도 HTTP 상태 코드는 200일 수 있으므로
+    # faultInfo를 확인합니다.
+    if "faultInfo" in data:
+
+        fault = data["faultInfo"]
+
+        error_code = fault.get(
+            "errorCode",
+            "알 수 없음"
+        )
+
+        error_message = fault.get(
+            "message",
+            "KOBIS API 오류가 발생했습니다."
+        )
+
+        return None, (
+            f"KOBIS API 오류가 발생했습니다.\n\n"
+            f"오류 코드: {error_code}\n"
+            f"오류 내용: {error_message}\n\n"
+            "KOBIS_KEY가 올바른지 확인해 주세요."
+        )
+
+    boxoffice_result = data.get("boxOfficeResult")
+
+    if not boxoffice_result:
+        return None, "박스오피스 결과가 없습니다."
+
+    movie_list = boxoffice_result.get(
+        "dailyBoxOfficeList",
+        []
+    )
+
+    # 영화 목록이 없으면 집계 전으로 안내
+    if not movie_list:
+        return None, "그날은 아직 집계 전입니다"
+
+    return movie_list, None
+
+
+# API를 호출하는 동안 안내 문구를 보여 줍니다.
+with st.spinner("🎬 박스오피스 데이터를 불러오는 중입니다..."):
+    movies, error_message = get_boxoffice(target_dt)
+
+
+# --------------------------------------------------
+# 5. 오류 처리
+# --------------------------------------------------
+
+if error_message:
+
+    if error_message == "그날은 아직 집계 전입니다":
+        st.info("📅 그날은 아직 집계 전입니다.")
+    else:
+        st.error(error_message)
+
     st.stop()
 
-# 인증키가 틀리면 상태코드는 200이지만 faultInfo 상자가 온다
-if "faultInfo" in data:
-    st.error(f"API가 오류를 돌려주었습니다: {data['faultInfo'].get('message', '')}")
-    st.info("비밀 금고(secrets)의 KOBIS_KEY 값이 올바른지 확인해 주세요.")
-    st.stop()
 
-movies = data.get("boxOfficeResult", {}).get("dailyBoxOfficeList", [])
-
-# 영화 목록이 비어서 오면 — 아직 집계 전인 날짜다
-if not movies:
-    st.warning("영화 목록이 비어 있습니다. 아직 집계 전인 날짜는 아닌지 확인해 주세요.")
-    st.stop()
+# --------------------------------------------------
+# 6. DataFrame 만들기
+# --------------------------------------------------
 
 df = pd.DataFrame(movies)
 
-# 숫자가 글자로 오므로 숫자로 바꿔야 정렬과 그래프에 쓸 수 있다
-for col in ["rank", "audiCnt", "audiAcc", "scrnCnt"]:
-    df[col] = pd.to_numeric(df[col])
 
-# 1위 영화는 지표 카드 세 장으로 크게
-top = df.sort_values("rank").iloc[0]
-st.subheader(f"🥇 1위 — {top['movieNm']}")
-c1, c2, c3 = st.columns(3)
-c1.metric("어제 관객수", f"{top['audiCnt']:,}명")
-c2.metric("누적 관객수", f"{top['audiAcc']:,}명")
-c3.metric("스크린수", f"{top['scrnCnt']:,}개")
+# 숫자로 변환할 열
+number_columns = [
+    "rank",
+    "rankInten",
+    "audiCnt",
+    "audiAcc",
+    "scrnCnt",
+    "showCnt"
+]
 
-# 전체 순위표
-st.subheader("📋 어제의 순위표")
-table = df.sort_values("rank")[["rank", "movieNm", "openDt", "audiCnt", "audiAcc", "scrnCnt"]]
-table.columns = ["순위", "영화명", "개봉일", "관객수", "누적관객", "스크린수"]
-st.dataframe(table, hide_index=True, width="stretch")
+for column in number_columns:
+    df[column] = pd.to_numeric(
+        df[column],
+        errors="coerce"
+    ).fillna(0).astype(int)
 
-# 관객수 상위 5편은 막대그래프로
+
+# --------------------------------------------------
+# 7. 영화명에 트로피 표시
+# --------------------------------------------------
+
+df["displayMovieNm"] = df.apply(
+    lambda row: (
+        f"{row['movieNm']} 🏆"
+        if row["audiAcc"] > 1_000_000
+        else row["movieNm"]
+    ),
+    axis=1
+)
+
+
+# --------------------------------------------------
+# 8. 순위 증감 표시
+# --------------------------------------------------
+
+def make_rank_change(value):
+
+    if value > 0:
+        return f"🔴 ↑ {value}"
+
+    elif value < 0:
+        return f"🔵 ↓ {abs(value)}"
+
+    else:
+        return "－"
+
+
+df["rankChange"] = df["rankInten"].apply(
+    make_rank_change
+)
+
+
+# --------------------------------------------------
+# 9. 100만 관객 필터
+# --------------------------------------------------
+
+if million_only:
+
+    df = df[
+        df["audiAcc"] > 1_000_000
+    ].copy()
+
+    if df.empty:
+        st.info("🏆 누적관객 100만 명을 넘은 영화가 없습니다.")
+        st.stop()
+
+
+# --------------------------------------------------
+# 10. 정렬
+# --------------------------------------------------
+
+if sort_option == "순위순":
+
+    df = df.sort_values(
+        "rank",
+        ascending=True
+    )
+
+elif sort_option == "관객수순":
+
+    df = df.sort_values(
+        "audiCnt",
+        ascending=False
+    )
+
+elif sort_option == "누적관객순":
+
+    df = df.sort_values(
+        "audiAcc",
+        ascending=False
+    )
+
+elif sort_option == "스크린수순":
+
+    df = df.sort_values(
+        "scrnCnt",
+        ascending=False
+    )
+
+
+# --------------------------------------------------
+# 11. 조회 결과 요약
+# --------------------------------------------------
+
+st.subheader(
+    f"📅 {selected_date.strftime('%Y년 %m월 %d일')}"
+)
+
+summary1, summary2, summary3 = st.columns(3)
+
+with summary1:
+    st.metric(
+        "조회 영화 수",
+        f"{len(df)}편"
+    )
+
+with summary2:
+    st.metric(
+        "해당일 전체 관객수",
+        f"{df['audiCnt'].sum():,}명"
+    )
+
+with summary3:
+    st.metric(
+        "100만 관객 돌파 영화",
+        f"{(df['audiAcc'] > 1_000_000).sum()}편"
+    )
+
+
+# --------------------------------------------------
+# 12. 1위 영화 정보
+# --------------------------------------------------
+
+first_movie = df.iloc[0]
+
+st.subheader(
+    f"🥇 1위: {first_movie['displayMovieNm']}"
+)
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    st.metric(
+        "해당일 관객수",
+        f"{first_movie['audiCnt']:,}명"
+    )
+
+with col2:
+    st.metric(
+        "누적 관객수",
+        f"{first_movie['audiAcc']:,}명"
+    )
+
+with col3:
+    st.metric(
+        "스크린수",
+        f"{first_movie['scrnCnt']:,}개"
+    )
+
+
+# --------------------------------------------------
+# 13. 표시할 열 선택
+# --------------------------------------------------
+
+st.subheader("📋 박스오피스 표")
+
+available_columns = [
+    "순위",
+    "전일 대비",
+    "영화명",
+    "개봉일",
+    "관객수",
+    "누적관객",
+    "스크린수"
+]
+
+selected_columns = st.multiselect(
+    "표에 표시할 항목을 선택하세요.",
+    available_columns,
+    default=available_columns
+)
+
+# 아무 열도 선택하지 않은 경우
+if not selected_columns:
+    st.warning("표시할 항목을 하나 이상 선택해 주세요.")
+else:
+
+    # 원본 데이터에서 화면 표시용 DataFrame을 만듭니다.
+    table_df = df[
+        [
+            "rank",
+            "rankChange",
+            "displayMovieNm",
+            "openDt",
+            "audiCnt",
+            "audiAcc",
+            "scrnCnt"
+        ]
+    ].copy()
+
+    table_df.columns = available_columns
+
+    # 사용자가 선택한 열만 표시합니다.
+    table_df = table_df[selected_columns]
+
+    # 숫자에 천 단위 쉼표를 표시합니다.
+    format_dict = {}
+
+    if "관객수" in selected_columns:
+        format_dict["관객수"] = "{:,}"
+
+    if "누적관객" in selected_columns:
+        format_dict["누적관객"] = "{:,}"
+
+    if "스크린수" in selected_columns:
+        format_dict["스크린수"] = "{:,}"
+
+    st.dataframe(
+        table_df.style.format(format_dict),
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# --------------------------------------------------
+# 14. 관객수 TOP 5 그래프
+# --------------------------------------------------
+
 st.subheader("📊 관객수 상위 5편")
-top5 = df.sort_values("audiCnt", ascending=False).head(5)
-fig = px.bar(top5, x="movieNm", y="audiCnt", labels={"movieNm": "영화명", "audiCnt": "어제 관객수"})
-st.plotly_chart(fig, width="stretch")
-import datetime
-import pandas as pd
-import requests
-import streamlit as st
 
-KST = datetime.timezone(datetime.timedelta(hours=9))
-어제 = datetime.datetime.now(KST).date() - datetime.timedelta(days=1)
-고른날 = st.date_input("날짜를 고르세요", value=어제, max_value=어제)
+top5 = (
+    df.sort_values(
+        "audiCnt",
+        ascending=False
+    )
+    .head(5)
+)
 
-URL = "https://www.kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json"
+chart_df = top5.set_index(
+    "displayMovieNm"
+)[["audiCnt"]]
 
-
-@st.cache_data(ttl=3600)
-def fetch(day_text):
-    res = requests.get(URL, params={"key": st.secrets["KOBIS_KEY"], "targetDt": day_text}, timeout=20)
-    answer = res.json().get("boxOfficeResult")
-    return answer["dailyBoxOfficeList"] if answer else []
+st.bar_chart(
+    chart_df,
+    x_label="영화명",
+    y_label="관객수"
+)
 
 
-movies = fetch(고른날.strftime("%Y%m%d"))
-if not movies:
-    st.info("그날은 아직 집계 전입니다.")
-    st.stop()
+# --------------------------------------------------
+# 15. CSV 다운로드
+# --------------------------------------------------
 
-표 = pd.DataFrame([{
-    "순위": int(m["rank"]),
-    "영화명": ("🏆 " if int(m["audiAcc"]) >= 1_000_000 else "") + m["movieNm"],
-    "순위 변화": ("🔺" + str(int(m["rankInten"])) if int(m["rankInten"]) > 0
-                 else "🔻" + str(-int(m["rankInten"])) if int(m["rankInten"]) < 0 else "—"),
-    "관객수": int(m["audiCnt"]),
-    "누적관객": int(m["audiAcc"]),
-} for m in movies])
-st.dataframe(표, hide_index=True)
-st.caption("🔺 오른 영화 · 🔻 내린 영화 · 🏆 누적 100만 명을 넘은 영화")
+st.subheader("💾 데이터 저장")
+
+# 다운로드할 CSV는 원래 데이터 기준으로 만듭니다.
+download_df = df[
+    [
+        "rank",
+        "rankInten",
+        "movieNm",
+        "openDt",
+        "audiCnt",
+        "audiAcc",
+        "scrnCnt"
+    ]
+].copy()
+
+download_df.columns = [
+    "순위",
+    "전일대비순위증감",
+    "영화명",
+    "개봉일",
+    "관객수",
+    "누적관객",
+    "스크린수"
+]
+
+# CSV 파일로 변환합니다.
+csv_data = download_df.to_csv(
+    index=False,
+    encoding="utf-8-sig"
+)
+
+st.download_button(
+    label="📥 CSV로 다운로드",
+    data=csv_data,
+    file_name=f"boxoffice_{target_dt}.csv",
+    mime="text/csv"
+)
+```
