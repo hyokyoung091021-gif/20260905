@@ -102,3 +102,88 @@ try:
 except Exception as e:
     st.error("데이터를 불러오는 중 문제가 발생했습니다.")
     st.exception(e)
+import streamlit as st
+import pandas as pd
+import numpy as np
+
+st.set_page_config(
+    page_title="서울 일별 평균기온 분포",
+    page_icon="🌡️",
+    layout="wide"
+)
+
+DATA_URL = "https://raw.githubusercontent.com/greatsong/modudata/main/data/seoul.csv"
+
+
+@st.cache_data
+def load_data():
+    df = pd.read_csv(DATA_URL, encoding="utf-8-sig")
+
+    df["날짜"] = pd.to_datetime(df["날짜"])
+    df["평균기온"] = pd.to_numeric(df["평균기온"], errors="coerce")
+
+    return df.dropna(subset=["평균기온"])
+
+
+st.title("🌡️ 서울의 일별 평균기온 분포")
+st.write("서울의 일별 평균기온이 어느 온도 구간에 얼마나 몰려 있는지 확인해 보세요.")
+
+try:
+    df = load_data()
+
+    # 기온 구간 간격
+    bin_width = st.sidebar.slider(
+        "기온 구간 간격",
+        min_value=1,
+        max_value=5,
+        value=2,
+        step=1
+    )
+
+    min_temp = np.floor(df["평균기온"].min() / bin_width) * bin_width
+    max_temp = np.ceil(df["평균기온"].max() / bin_width) * bin_width
+
+    bins = np.arange(
+        min_temp,
+        max_temp + bin_width,
+        bin_width
+    )
+
+    counts, edges = np.histogram(
+        df["평균기온"],
+        bins=bins
+    )
+
+    # 각 구간의 가운데 값을 x축으로 사용
+    labels = [
+        f"{edges[i]:.0f}~{edges[i + 1]:.0f}°C"
+        for i in range(len(edges) - 1)
+    ]
+
+    histogram = pd.DataFrame({
+        "기온 구간": labels,
+        "일수": counts
+    })
+
+    st.subheader("일별 평균기온 히스토그램")
+
+    st.bar_chart(
+        histogram.set_index("기온 구간"),
+        y="일수",
+        y_label="일수"
+    )
+
+    st.caption(
+        f"전체 {len(df):,}일의 평균기온을 {bin_width}°C 간격으로 나누어 표시했습니다."
+    )
+
+    with st.expander("기온 구간별 일수 보기"):
+        st.dataframe(
+            histogram,
+            use_container_width=True,
+            hide_index=True
+        )
+
+except Exception as e:
+    st.error("데이터를 불러오는 중 문제가 발생했습니다.")
+    st.exception(e)
