@@ -187,3 +187,59 @@ try:
 except Exception as e:
     st.error("데이터를 불러오는 중 문제가 발생했습니다.")
     st.exception(e)
+import streamlit as st
+import pandas as pd
+
+st.set_page_config(
+    page_title="서울 최저·최고기온 관계",
+    page_icon="🌡️",
+    layout="wide"
+)
+
+DATA_URL = "https://raw.githubusercontent.com/greatsong/modudata/main/data/seoul.csv"
+
+
+@st.cache_data
+def load_data():
+    df = pd.read_csv(DATA_URL, encoding="utf-8-sig")
+
+    df["날짜"] = pd.to_datetime(df["날짜"])
+    df["최저기온"] = pd.to_numeric(df["최저기온"], errors="coerce")
+    df["최고기온"] = pd.to_numeric(df["최고기온"], errors="coerce")
+
+    return df.dropna(subset=["최저기온", "최고기온"])
+
+
+st.title("🌡️ 서울의 최저기온과 최고기온 관계")
+st.write("각 날짜의 최저기온과 최고기온이 어떤 관계를 보이는지 산점도로 확인합니다.")
+
+try:
+    df = load_data()
+
+    # 산점도에 사용할 데이터
+    chart_data = df[["최저기온", "최고기온"]].copy()
+
+    st.subheader("일별 최저기온과 최고기온")
+
+    st.scatter_chart(
+        chart_data,
+        x="최저기온",
+        y="최고기온",
+        x_label="최저기온 (°C)",
+        y_label="최고기온 (°C)"
+    )
+
+    st.caption(
+        f"총 {len(chart_data):,}일의 기온 데이터를 표시했습니다."
+    )
+
+    with st.expander("데이터 보기"):
+        st.dataframe(
+            df[["날짜", "최저기온", "최고기온"]],
+            use_container_width=True,
+            hide_index=True
+        )
+
+except Exception as e:
+    st.error("데이터를 불러오는 중 문제가 발생했습니다.")
+    st.exception(e)
