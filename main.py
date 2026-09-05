@@ -455,3 +455,55 @@ st.download_button(
     file_name=f"boxoffice_{target_dt}.csv",
     mime="text/csv"
 )
+# 영화관 분위기를 위한 화면 디자인
+st.markdown("""
+<style>
+    /* 전체 앱 배경 */
+    .stApp {
+        background-color: #111111;
+        color: #FFFFFF;
+    }
+
+    /* 제목과 글자 */
+    h1, h2, h3, p, label {
+        color: #FFFFFF !important;
+    }
+
+    /* 사이드바 */
+    [data-testid="stSidebar"] {
+        background-color: #1C1C1C;
+    }
+
+    /* 숫자 카드 */
+    [data-testid="stMetric"] {
+        background-color: #222222;
+        border: 1px solid #444444;
+        border-radius: 12px;
+        padding: 15px;
+    }
+
+    /* 데이터 표 */
+    [data-testid="stDataFrame"] {
+        background-color: #1C1C1C;
+        border-radius: 10px;
+    }
+
+    /* 구분선 */
+    hr {
+        border-color: #444444;
+    }
+
+    /* 버튼 */
+    .stButton > button {
+        background-color: #333333;
+        color: white;
+        border-radius: 8px;
+        border: 1px solid #555555;
+    }
+
+    .stButton > button:hover {
+        background-color: #555555;
+        color: white;
+    }
+</style>
+""", unsafe_allow_html=True)
