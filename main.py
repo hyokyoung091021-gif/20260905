@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import requests
 import pandas as pd
@@ -456,4 +455,3 @@ st.download_button(
     file_name=f"boxoffice_{target_dt}.csv",
     mime="text/csv"
 )
-```
