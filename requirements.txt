@@ -1,3 +1,4 @@
 streamlit
 pandas
 plotly
+NEIS_KEY = "발급받은_나이스_API_인증키"
