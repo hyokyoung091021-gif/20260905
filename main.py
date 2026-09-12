@@ -1,752 +1,662 @@
 import streamlit as st
+import requests
 import pandas as pd
-import plotly.express as px
+from datetime import timedelta
+import re
 
-
-# ===================================
-# 페이지 설정
-# ===================================
+# --------------------------------------------------
+# 기본 설정
+# --------------------------------------------------
 
 st.set_page_config(
-    page_title="영화 데이터 그래프 도감 2 - 분포와 관계",
+    page_title="학교별 시험기간 급식 칼로리 비교",
+    page_icon="🍚",
     layout="wide"
 )
 
-
-# ===================================
-# 제목
-# ===================================
-
-st.title("🎬 영화 데이터 그래프 도감 2 - 분포와 관계")
-
-st.write(
-    "1년간 박스오피스 10위권에 든 영화들의 데이터를 이용해 "
-    "영화의 분포와 여러 변수 사이의 관계를 살펴봅니다."
-)
+st.title("🍚 시험기간 전후 급식 칼로리 비교")
+st.write("""
+동산고등학교, 가좌고등학교, 인화여자고등학교의 중식 급식 데이터를 이용하여  
+**시험이 시작되는 주와 시험 전 주의 급식 칼로리 차이**를 비교합니다.
+""")
 
 
-# ===================================
-# 데이터 불러오기
-# ===================================
+# --------------------------------------------------
+# API 키
+# --------------------------------------------------
+
+try:
+    API_KEY = st.secrets["NEIS_KEY"]
+except:
+    API_KEY = ""
+
+
+# --------------------------------------------------
+# 학교 목록
+# --------------------------------------------------
+
+SCHOOLS = [
+    "동산고등학교",
+    "가좌고등학교",
+    "인화여자고등학교"
+]
+
+
+# --------------------------------------------------
+# 학교 정보 찾기
+# --------------------------------------------------
 
 @st.cache_data
-def load_data():
+def get_school_info(school_name):
 
-    url = (
-        "https://raw.githubusercontent.com/"
-        "greatsong/modudata/main/data/kobis_movies.csv"
-    )
+    url = "https://open.neis.go.kr/hub/schoolInfo"
 
-    df = pd.read_csv(url)
+    params = {
+        "KEY": API_KEY,
+        "Type": "json",
+        "SCHUL_NM": school_name,
+        "pSize": 100
+    }
 
-    # -------------------------------
-    # 개봉일을 날짜 형식으로 변환
-    # -------------------------------
+    response = requests.get(url, params=params)
+    data = response.json()
 
-    df["openDt"] = pd.to_datetime(
-        df["openDt"].astype(str),
-        format="%Y%m%d",
-        errors="coerce"
-    )
+    if "schoolInfo" not in data:
+        return None
 
-    # -------------------------------
-    # 숫자 열을 숫자형으로 변환
-    # -------------------------------
+    rows = data["schoolInfo"][1]["row"]
 
-    numeric_columns = [
-        "first_scrn",
-        "first_show",
-        "first_week_audi",
-        "total_audi",
-        "days_in_top10"
-    ]
+    # 정확히 이름이 같은 학교 찾기
+    for school in rows:
 
-    for col in numeric_columns:
-        df[col] = pd.to_numeric(
-            df[col],
-            errors="coerce"
-        )
+        if school["SCHUL_NM"] == school_name:
 
-    # -------------------------------
-    # 장르가 여러 개인 경우
-    # 첫 번째 장르만 사용
-    # -------------------------------
+            return {
+                "학교명": school["SCHUL_NM"],
+                "교육청코드": school["ATPT_OFCDC_SC_CODE"],
+                "학교코드": school["SD_SCHUL_CODE"],
+                "지역": school["LCTN_SC_NM"]
+            }
 
-    df["genre"] = (
-        df["genre"]
-        .fillna("기타")
-        .astype(str)
-        .str.split("|")
-        .str[0]
-    )
+    return None
+
+
+# --------------------------------------------------
+# 칼로리 숫자로 변환
+# --------------------------------------------------
+
+def convert_calorie(cal_info):
+
+    if cal_info is None:
+        return None
+
+    # 예시:
+    # "850.3 Kcal"
+    # "850.3"
+    # 등의 형태에서 숫자만 추출
+
+    numbers = re.findall(r"[\d.]+", str(cal_info))
+
+    if len(numbers) > 0:
+        return float(numbers[0])
+
+    return None
+
+
+# --------------------------------------------------
+# 급식 데이터 가져오기
+# --------------------------------------------------
+
+@st.cache_data
+def get_meal_data(atpt_code, school_code, start_date, end_date):
+
+    url = "https://open.neis.go.kr/hub/mealServiceDietInfo"
+
+    params = {
+        "KEY": API_KEY,
+        "Type": "json",
+        "ATPT_OFCDC_SC_CODE": atpt_code,
+        "SD_SCHUL_CODE": school_code,
+        "MMEAL_SC_CODE": "2",  # 중식
+        "MLSV_FROM_YMD": start_date.strftime("%Y%m%d"),
+        "MLSV_TO_YMD": end_date.strftime("%Y%m%d"),
+        "pSize": 1000,
+        "pIndex": 1
+    }
+
+    response = requests.get(url, params=params)
+    data = response.json()
+
+    # 데이터가 없는 경우
+    if "mealServiceDietInfo" not in data:
+        return pd.DataFrame()
+
+    rows = data["mealServiceDietInfo"][1]["row"]
+
+    result = []
+
+    for row in rows:
+
+        calorie = convert_calorie(row.get("CAL_INFO"))
+
+        result.append({
+            "날짜": pd.to_datetime(row["MLSV_YMD"]),
+            "칼로리": calorie,
+            "메뉴": row.get("DDISH_NM", "")
+        })
+
+    df = pd.DataFrame(result)
 
     return df
 
 
-# 데이터 불러오기
-df = load_data()
+# --------------------------------------------------
+# 시험 시작일이 포함된 주 계산
+# --------------------------------------------------
 
+def get_week_dates(exam_start_date):
 
-# ===================================
-# SECTION 1
-# 장르별 영화 편수
-# ===================================
+    # 월요일 찾기
+    monday = exam_start_date - timedelta(
+        days=exam_start_date.weekday()
+    )
 
-st.header("🍩 1. 장르별 영화 편수")
+    # 일요일
+    sunday = monday + timedelta(days=6)
 
-st.write(
-    "1년간 박스오피스 10위권에 오른 영화들을 "
-    "첫 번째 장르를 기준으로 분류하여 영화 편수를 비교합니다."
-)
+    return monday, sunday
 
 
-# -----------------------------------
-# 장르별 영화 편수 계산
-# -----------------------------------
+# --------------------------------------------------
+# 사이드바
+# --------------------------------------------------
 
-genre_count = (
-    df["genre"]
-    .value_counts()
-    .reset_index()
-)
+st.sidebar.header("📅 시험 시작일 설정")
 
+st.sidebar.write("""
+각 학교의 시험 시작일을 입력하세요.
 
-# 열 이름 변경
-genre_count.columns = [
-    "장르",
-    "영화편수"
-]
+프로그램은 자동으로:
 
+- 시험 시작일이 포함된 월요일~일요일
+- 그 전 주의 월요일~일요일
 
-# -----------------------------------
-# 도넛 그래프
-# -----------------------------------
+을 비교합니다.
+""")
 
-fig1 = px.pie(
-    genre_count,
-    names="장르",
-    values="영화편수",
-    hole=0.4,
-    title="장르별 영화 편수"
-)
 
+exam_dates = {}
 
-# -----------------------------------
-# 마우스를 올렸을 때 표시
-# -----------------------------------
+for school in SCHOOLS:
 
-fig1.update_traces(
-    hovertemplate=
-    "장르: %{label}<br>"
-    "영화 편수: %{value}편<br>"
-    "비율: %{percent}"
-    "<extra></extra>"
-)
+    exam_dates[school] = st.sidebar.date_input(
+        f"{school} 시험 시작일",
+        key=school
+    )
 
 
-# -----------------------------------
-# 그래프 출력
-# -----------------------------------
+# --------------------------------------------------
+# 분석 시작 버튼
+# --------------------------------------------------
 
-st.plotly_chart(
-    fig1,
-    use_container_width=True
-)
+if st.button("🔍 세 학교 급식 칼로리 비교", use_container_width=True):
 
+    if not API_KEY:
 
-# -----------------------------------
-# 이 그래프로 알 수 있는 것
-# -----------------------------------
+        st.error("""
+        NEIS API 키가 설정되지 않았습니다.
 
-st.info(
-    "💡 이 그래프로 알 수 있는 것: "
-    "박스오피스 10위권에 든 영화들이 어떤 장르에 많이 분포되어 있는지 "
-    "확인할 수 있습니다."
-)
-# ===================================
-# SECTION 2
-# 장르별 영화 총 관객 트리맵
-# ===================================
+        Streamlit Secrets에 다음과 같이 설정하세요.
 
-st.divider()
+        NEIS_KEY = "여기에_API_키"
+        """)
 
-st.header("🗂️ 2. 장르별 영화 총 관객")
+        st.stop()
 
-st.write(
-    "장르별로 영화를 묶고, 각 영화의 칸 크기를 "
-    "총 관객 수에 따라 나타냅니다."
-)
 
+    all_results = []
+    all_daily_data = []
 
-# -----------------------------------
-# 트리맵 데이터 준비
-# -----------------------------------
 
-treemap_df = df[
-    ["genre", "movieNm", "total_audi"]
-].copy()
-
-
-# 총 관객 수가 없는 데이터 제거
-treemap_df = treemap_df.dropna(
-    subset=["total_audi"]
-)
+    # --------------------------------------------------
+    # 학교별 분석
+    # --------------------------------------------------
 
-
-# -----------------------------------
-# 트리맵 만들기
-# -----------------------------------
-
-fig2 = px.treemap(
-    treemap_df,
-    path=[
-        "genre",
-        "movieNm"
-    ],
-    values="total_audi",
-    title="장르 안의 영화별 총 관객 수",
-    hover_data={
-        "total_audi": ":,"
-    }
-)
+    for school_name in SCHOOLS:
 
+        st.subheader(f"🏫 {school_name}")
 
-# -----------------------------------
-# 마우스를 올렸을 때 표시
-# -----------------------------------
+        # ----------------------------
+        # 학교 정보 가져오기
+        # ----------------------------
 
-fig2.update_traces(
-    hovertemplate=
-    "영화명: %{label}<br>"
-    "총 관객: %{value:,}명"
-    "<extra></extra>"
-)
-
-
-# -----------------------------------
-# 그래프 출력
-# -----------------------------------
+        school_info = get_school_info(school_name)
 
-st.plotly_chart(
-    fig2,
-    use_container_width=True
-)
+        if school_info is None:
 
-
-# -----------------------------------
-# 이 그래프로 알 수 있는 것
-# -----------------------------------
+            st.error(
+                f"{school_name}의 학교 정보를 찾지 못했습니다."
+            )
 
-st.info(
-    "💡 이 그래프로 알 수 있는 것: "
-    "장르별 영화들의 규모와 각 영화의 총 관객 수를 한눈에 비교할 수 있으며, "
-    "칸이 클수록 총 관객 수가 많음을 알 수 있습니다."
-)
-# ===================================
-# SECTION 3
-# 총 관객 수 분포
-# ===================================
+            continue
 
-st.divider()
 
-st.header("📊 3. 영화별 총 관객 수 분포")
+        st.write(
+            f"📍 지역: {school_info['지역']}"
+        )
 
-st.write(
-    "1년간 박스오피스 10위권에 든 영화들의 "
-    "총 관객 수가 어느 구간에 많이 분포하는지 살펴봅니다."
-)
 
+        # ----------------------------
+        # 시험 주 계산
+        # ----------------------------
 
-# -----------------------------------
-# 히스토그램에 사용할 데이터
-# -----------------------------------
+        exam_date = exam_dates[school_name]
 
-audi_df = df.dropna(
-    subset=["total_audi"]
-).copy()
+        exam_week_start, exam_week_end = get_week_dates(
+            exam_date
+        )
 
+        previous_week_start = (
+            exam_week_start - timedelta(days=7)
+        )
 
-# -----------------------------------
-# 히스토그램
-# -----------------------------------
+        previous_week_end = (
+            exam_week_start - timedelta(days=1)
+        )
 
-fig3 = px.histogram(
-    audi_df,
-    x="total_audi",
-    nbins=20,
-    title="영화별 총 관객 수 분포",
-    labels={
-        "total_audi": "총 관객 수"
-    }
-)
 
+        st.info(f"""
+        **시험 시작일:** {exam_date}
 
-# 마우스를 올렸을 때 표시
-fig3.update_traces(
-    hovertemplate=
-    "총 관객 수 구간: %{x}<br>"
-    "영화 편수: %{y}편"
-    "<extra></extra>"
-)
+        **시험 주:**  
+        {exam_week_start} ~ {exam_week_end}
 
+        **시험 전 주:**  
+        {previous_week_start} ~ {previous_week_end}
+        """)
 
-# 그래프 설정
-fig3.update_layout(
-    xaxis_title="총 관객 수",
-    yaxis_title="영화 편수"
-)
 
+        # ----------------------------
+        # 시험 주 급식 데이터
+        # ----------------------------
 
-# 그래프 출력
-st.plotly_chart(
-    fig3,
-    use_container_width=True
-)
+        exam_df = get_meal_data(
 
+            school_info["교육청코드"],
+            school_info["학교코드"],
 
-# ===================================
-# 그래프 분석 문구 만들기
-# ===================================
-
-
-# -----------------------------------
-# 가장 많은 영화가 몰린 구간 계산
-# -----------------------------------
-
-hist_count, bin_edges = pd.cut(
-    audi_df["total_audi"],
-    bins=20
-).value_counts().sort_index().align(
-    pd.cut(
-        audi_df["total_audi"],
-        bins=20
-    ).value_counts().sort_index()
-)
-
-
-# 가장 많은 영화가 있는 구간
-bin_result = pd.cut(
-    audi_df["total_audi"],
-    bins=20
-)
-
-most_common_interval = (
-    bin_result.value_counts()
-    .idxmax()
-)
-
-
-# -----------------------------------
-# 가장 관객이 많은 영화 찾기
-# -----------------------------------
-
-max_movie = audi_df.loc[
-    audi_df["total_audi"].idxmax()
-]
-
-
-max_movie_name = max_movie["movieNm"]
-
-max_movie_audi = max_movie["total_audi"]
-
-
-# -----------------------------------
-# 그래프 아래 문구
-# -----------------------------------
-
-st.info(
-    f"💡 이 그래프로 알 수 있는 것: "
-    f"대부분의 영화는 총 관객 수 약 "
-    f"{most_common_interval.left:,.0f}명 ~ "
-    f"{most_common_interval.right:,.0f}명 구간에 가장 많이 몰려 있으며, "
-    f"가장 많은 관객을 기록한 영화는 "
-    f"「{max_movie_name}」로 "
-    f"총 {max_movie_audi:,.0f}명이 관람했습니다."
-)
-# ===================================
-# SECTION 4
-# 개봉일 스크린수와 총 관객의 관계
-# ===================================
-
-st.divider()
-
-st.header("🔵 4. 개봉일 스크린수와 총 관객의 관계")
-
-st.write(
-    "영화의 개봉일 스크린수와 총 관객 수 사이에 "
-    "어떤 관계가 있는지 장르별로 비교합니다."
-)
-
-
-# -----------------------------------
-# 산점도에 사용할 데이터
-# -----------------------------------
-
-scatter_df = df.dropna(
-    subset=[
-        "first_scrn",
-        "total_audi",
-        "movieNm",
-        "genre"
-    ]
-).copy()
-
-
-# -----------------------------------
-# 산점도
-# -----------------------------------
-
-fig4 = px.scatter(
-    scatter_df,
-    x="first_scrn",
-    y="total_audi",
-    color="genre",
-    hover_name="movieNm",
-    title="개봉일 스크린수와 총 관객의 관계",
-    labels={
-        "first_scrn": "개봉일 스크린수",
-        "total_audi": "총 관객",
-        "genre": "장르"
-    },
-    hover_data={
-        "first_scrn": ":,",
-        "total_audi": ":,"
-    }
-)
+            exam_week_start,
+            exam_week_end
+        )
 
 
-# -----------------------------------
-# 마우스를 올렸을 때 표시 형식
-# -----------------------------------
-
-fig4.update_traces(
-    hovertemplate=
-    "<b>%{hovertext}</b><br>"
-    "개봉일 스크린수: %{x:,}개<br>"
-    "총 관객: %{y:,}명"
-    "<extra></extra>"
-)
-
-
-# -----------------------------------
-# 그래프 설정
-# -----------------------------------
-
-fig4.update_layout(
-    xaxis_title="개봉일 스크린수",
-    yaxis_title="총 관객",
-    legend_title="장르"
-)
-
-
-# -----------------------------------
-# 그래프 출력
-# -----------------------------------
-
-st.plotly_chart(
-    fig4,
-    use_container_width=True
-)
-
-
-# -----------------------------------
-# 이 그래프로 알 수 있는 것
-# -----------------------------------
-
-st.info(
-    "💡 이 그래프로 알 수 있는 것: "
-    "개봉일에 많은 스크린에서 상영된 영화가 반드시 많은 관객을 모으는 것은 아닌지, "
-    "그리고 장르에 따라 스크린수와 총 관객의 관계가 어떻게 다른지 비교할 수 있습니다."
-)
-# ===================================
-# SECTION 5
-# 장르별 총 관객 분포
-# ===================================
-
-st.divider()
-
-st.header("📦 5. 장르별 총 관객 분포")
-
-st.write(
-    "영화가 10편 이상인 장르를 골라 "
-    "장르별 영화의 총 관객 수 분포를 비교합니다."
-)
-
-
-# -----------------------------------
-# 박스플롯에 사용할 데이터
-# -----------------------------------
-
-box_df = df.dropna(
-    subset=[
-        "genre",
-        "total_audi",
-        "movieNm"
-    ]
-).copy()
-
-
-# -----------------------------------
-# 장르별 영화 편수 계산
-# -----------------------------------
-
-genre_movie_count = (
-    box_df.groupby("genre")["movieNm"]
-    .nunique()
-)
-
-
-# 영화가 10편 이상인 장르만 선택
-valid_genres = genre_movie_count[
-    genre_movie_count >= 10
-].index
-
-
-box_df = box_df[
-    box_df["genre"].isin(valid_genres)
-]
-
-
-# -----------------------------------
-# 박스플롯
-# -----------------------------------
-
-fig5 = px.box(
-    box_df,
-    x="genre",
-    y="total_audi",
-    points="outliers",
-    hover_name="movieNm",
-    title="영화가 10편 이상인 장르별 총 관객 분포",
-    labels={
-        "genre": "장르",
-        "total_audi": "총 관객"
-    },
-    hover_data={
-        "total_audi": ":,"
-    }
-)
-
-
-# -----------------------------------
-# 마우스를 올렸을 때 표시
-# -----------------------------------
-
-fig5.update_traces(
-    hovertemplate=
-    "<b>%{hovertext}</b><br>"
-    "총 관객: %{y:,}명"
-    "<extra></extra>"
-)
-
-
-# -----------------------------------
-# 그래프 설정
-# -----------------------------------
-
-fig5.update_layout(
-    xaxis_title="장르",
-    yaxis_title="총 관객",
-    showlegend=False
-)
-
-
-# -----------------------------------
-# 그래프 출력
-# -----------------------------------
-
-st.plotly_chart(
-    fig5,
-    use_container_width=True
-)
-
-
-# -----------------------------------
-# 이 그래프로 알 수 있는 것
-# -----------------------------------
-
-st.info(
-    "💡 이 그래프로 알 수 있는 것: "
-    "영화가 충분히 많은 장르끼리 총 관객 수의 분포를 비교할 수 있으며, "
-    "특히 다른 영화들과 크게 차이 나는 흥행 영화도 확인할 수 있습니다."
-)
-# ===================================
-# SECTION 6
-# 개봉일 스크린수, 첫 주 관객,
-# 총 관객의 관계
-# ===================================
-
-st.divider()
-
-st.header("🫧 6. 스크린수·첫 주 관객·총 관객의 관계")
-
-st.write(
-    "개봉일 스크린수와 총 관객의 관계를 살펴보고, "
-    "버블의 크기로 개봉 첫 주 관객 수를 함께 나타냅니다."
-)
-
-
-# -----------------------------------
-# 버블 그래프에 사용할 데이터
-# -----------------------------------
-
-bubble_df = df.dropna(
-    subset=[
-        "first_scrn",
-        "first_week_audi",
-        "total_audi",
-        "movieNm",
-        "genre"
-    ]
-).copy()
-
-
-# -----------------------------------
-# 버블 그래프
-# -----------------------------------
-
-fig6 = px.scatter(
-    bubble_df,
-    x="first_scrn",
-    y="total_audi",
-    size="first_week_audi",
-    color="genre",
-    hover_name="movieNm",
-    title="개봉일 스크린수·첫 주 관객·총 관객의 관계",
-    labels={
-        "first_scrn": "개봉일 스크린수",
-        "total_audi": "총 관객",
-        "first_week_audi": "개봉 첫 주 관객",
-        "genre": "장르"
-    },
-    hover_data={
-        "first_scrn": ":,",
-        "first_week_audi": ":,",
-        "total_audi": ":,"
-    },
-    size_max=60
-)
-
-
-# -----------------------------------
-# 그래프 설정
-# -----------------------------------
-
-fig6.update_layout(
-    xaxis_title="개봉일 스크린수",
-    yaxis_title="총 관객",
-    legend_title="장르"
-)
-
-
-# -----------------------------------
-# 그래프 출력
-# -----------------------------------
-
-st.plotly_chart(
-    fig6,
-    use_container_width=True
-)
-
-
-# -----------------------------------
-# 이 그래프로 알 수 있는 것
-# -----------------------------------
-
-st.info(
-    "💡 이 그래프로 알 수 있는 것: "
-    "개봉일 스크린수가 많고 첫 주 관객이 많은 영화가 "
-    "항상 총 관객도 많은지 확인할 수 있으며, "
-    "장르별 흥행 패턴의 차이도 비교할 수 있습니다."
-)
-# ===================================
-# SECTION 7
-# 제작 국가와 장르의 관계
-# ===================================
-
-st.divider()
-
-st.header("🌞 7. 제작 국가와 장르의 관계")
-
-st.write(
-    "제작 국가에서 장르로 내려가며 "
-    "각 국가와 장르에 속한 영화의 편수를 살펴봅니다."
-)
-
-
-# -----------------------------------
-# 선버스트 그래프에 사용할 데이터
-# -----------------------------------
-
-sunburst_df = df.dropna(
-    subset=[
-        "nation",
-        "genre",
-        "movieNm"
-    ]
-).copy()
-
-
-# -----------------------------------
-# 제작 국가 × 장르별 영화 편수 계산
-# -----------------------------------
-
-nation_genre_count = (
-    sunburst_df
-    .groupby(["nation", "genre"])
-    .size()
-    .reset_index(name="영화편수")
-)
-
-
-# -----------------------------------
-# 선버스트 그래프
-# -----------------------------------
-
-fig7 = px.sunburst(
-    nation_genre_count,
-    path=[
-        "nation",
-        "genre"
-    ],
-    values="영화편수",
-    title="제작 국가 → 장르별 영화 편수",
-    labels={
-        "nation": "제작 국가",
-        "genre": "장르",
-        "영화편수": "영화 편수"
-    }
-)
-
-
-# -----------------------------------
-# 마우스를 올렸을 때 표시
-# -----------------------------------
-
-fig7.update_traces(
-    hovertemplate=
-    "분류: %{label}<br>"
-    "영화 편수: %{value}편"
-    "<extra></extra>"
-)
-
-
-# -----------------------------------
-# 그래프 출력
-# -----------------------------------
-
-st.plotly_chart(
-    fig7,
-    use_container_width=True
-)
-
-
-# -----------------------------------
-# 이 그래프로 알 수 있는 것
-# -----------------------------------
-
-st.info(
-    "💡 이 그래프로 알 수 있는 것: "
-    "박스오피스 10위권에 오른 영화들이 어떤 제작 국가에서 많이 만들어졌는지와 "
-    "각 국가에서 어떤 장르의 영화가 많이 나타나는지 함께 확인할 수 있습니다."
-)
+        # ----------------------------
+        # 시험 전 주 급식 데이터
+        # ----------------------------
+
+        previous_df = get_meal_data(
+
+            school_info["교육청코드"],
+            school_info["학교코드"],
+
+            previous_week_start,
+            previous_week_end
+        )
+
+
+        # ----------------------------
+        # 데이터가 없는 경우
+        # ----------------------------
+
+        if exam_df.empty:
+
+            st.warning(
+                "시험 주의 급식 데이터가 없습니다."
+            )
+
+
+        if previous_df.empty:
+
+            st.warning(
+                "시험 전 주의 급식 데이터가 없습니다."
+            )
+
+
+        # ----------------------------
+        # 총 칼로리
+        # ----------------------------
+
+        exam_total = (
+            exam_df["칼로리"].sum()
+            if not exam_df.empty
+            else 0
+        )
+
+
+        previous_total = (
+            previous_df["칼로리"].sum()
+            if not previous_df.empty
+            else 0
+        )
+
+
+        # ----------------------------
+        # 하루 평균 칼로리
+        # ----------------------------
+
+        exam_average = (
+            exam_df["칼로리"].mean()
+            if not exam_df.empty
+            else 0
+        )
+
+
+        previous_average = (
+            previous_df["칼로리"].mean()
+            if not previous_df.empty
+            else 0
+        )
+
+
+        # ----------------------------
+        # 칼로리 차이
+        # ----------------------------
+
+        total_difference = (
+            exam_total - previous_total
+        )
+
+        average_difference = (
+            exam_average - previous_average
+        )
+
+
+        # ----------------------------
+        # 결과 표시
+        # ----------------------------
+
+        col1, col2, col3 = st.columns(3)
+
+
+        with col1:
+
+            st.metric(
+                "시험 주 총칼로리",
+                f"{exam_total:,.1f} kcal"
+            )
+
+
+        with col2:
+
+            st.metric(
+                "시험 전 주 총칼로리",
+                f"{previous_total:,.1f} kcal"
+            )
+
+
+        with col3:
+
+            st.metric(
+                "총칼로리 차이",
+                f"{total_difference:+,.1f} kcal"
+            )
+
+
+        col4, col5, col6 = st.columns(3)
+
+
+        with col4:
+
+            st.metric(
+                "시험 주 하루 평균",
+                f"{exam_average:,.1f} kcal"
+            )
+
+
+        with col5:
+
+            st.metric(
+                "시험 전 주 하루 평균",
+                f"{previous_average:,.1f} kcal"
+            )
+
+
+        with col6:
+
+            st.metric(
+                "하루 평균 차이",
+                f"{average_difference:+,.1f} kcal"
+            )
+
+
+        # ----------------------------
+        # 결과 저장
+        # ----------------------------
+
+        all_results.append({
+
+            "학교": school_name,
+
+            "시험 시작일": exam_date,
+
+            "시험 주 총칼로리": exam_total,
+
+            "시험 전 주 총칼로리": previous_total,
+
+            "총칼로리 차이":
+                total_difference,
+
+            "시험 주 하루 평균":
+                exam_average,
+
+            "시험 전 주 하루 평균":
+                previous_average,
+
+            "하루 평균 차이":
+                average_difference
+        })
+
+
+        # ----------------------------
+        # 일별 데이터 저장
+        # ----------------------------
+
+        if not exam_df.empty:
+
+            temp_exam = exam_df.copy()
+
+            temp_exam["학교"] = school_name
+
+            temp_exam["기간"] = "시험 주"
+
+            all_daily_data.append(temp_exam)
+
+
+        if not previous_df.empty:
+
+            temp_previous = previous_df.copy()
+
+            temp_previous["학교"] = school_name
+
+            temp_previous["기간"] = "시험 전 주"
+
+            all_daily_data.append(temp_previous)
+
+
+    # --------------------------------------------------
+    # 세 학교 종합 비교
+    # --------------------------------------------------
+
+    if len(all_results) > 0:
+
+        st.divider()
+
+        st.header("📊 세 학교 종합 비교")
+
+
+        result_df = pd.DataFrame(all_results)
+
+
+        # ----------------------------
+        # 결과 표
+        # ----------------------------
+
+        st.subheader("📋 학교별 칼로리 비교")
+
+        st.dataframe(
+
+            result_df,
+
+            use_container_width=True,
+
+            hide_index=True
+        )
+
+
+        # ----------------------------
+        # 총칼로리 비교 그래프
+        # ----------------------------
+
+        st.subheader(
+            "🍚 시험 주와 시험 전 주 총칼로리 비교"
+        )
+
+
+        chart_df = result_df.set_index("학교")[
+
+            [
+                "시험 주 총칼로리",
+                "시험 전 주 총칼로리"
+            ]
+
+        ]
+
+
+        st.bar_chart(chart_df)
+
+
+        # ----------------------------
+        # 하루 평균 비교
+        # ----------------------------
+
+        st.subheader(
+            "📈 하루 평균 칼로리 비교"
+        )
+
+
+        average_chart = result_df.set_index("학교")[
+
+            [
+                "시험 주 하루 평균",
+                "시험 전 주 하루 평균"
+            ]
+
+        ]
+
+
+        st.bar_chart(average_chart)
+
+
+        # ----------------------------
+        # 칼로리 차이 그래프
+        # ----------------------------
+
+        st.subheader(
+            "📊 시험 주와 시험 전 주의 칼로리 차이"
+        )
+
+
+        difference_chart = result_df.set_index("학교")[
+
+            "하루 평균 차이"
+
+        ]
+
+
+        st.bar_chart(difference_chart)
+
+
+        # --------------------------------------------------
+        # 일별 데이터
+        # --------------------------------------------------
+
+        if len(all_daily_data) > 0:
+
+            st.divider()
+
+            st.header("📅 일별 급식 칼로리 데이터")
+
+
+            daily_df = pd.concat(
+                all_daily_data,
+                ignore_index=True
+            )
+
+
+            daily_df = daily_df[
+
+                [
+                    "학교",
+                    "기간",
+                    "날짜",
+                    "칼로리",
+                    "메뉴"
+                ]
+
+            ]
+
+
+            st.dataframe(
+
+                daily_df,
+
+                use_container_width=True,
+
+                hide_index=True
+
+            )
+
+
+        # --------------------------------------------------
+        # 결론 자동 생성
+        # --------------------------------------------------
+
+        st.divider()
+
+        st.header("📝 분석 결과")
+
+
+        for _, row in result_df.iterrows():
+
+            school = row["학교"]
+
+            difference = row["하루 평균 차이"]
+
+
+            if difference > 0:
+
+                st.write(
+                    f"🔺 **{school}**은(는) "
+                    f"시험 주의 하루 평균 칼로리가 "
+                    f"시험 전 주보다 "
+                    f"**{difference:,.1f} kcal 높았습니다.**"
+                )
+
+
+            elif difference < 0:
+
+                st.write(
+                    f"🔻 **{school}**은(는) "
+                    f"시험 주의 하루 평균 칼로리가 "
+                    f"시험 전 주보다 "
+                    f"**{abs(difference):,.1f} kcal 낮았습니다.**"
+                )
+
+
+            else:
+
+                st.write(
+                    f"➖ **{school}**은(는) "
+                    f"시험 주와 시험 전 주의 "
+                    f"하루 평균 칼로리가 같습니다."
+                )
