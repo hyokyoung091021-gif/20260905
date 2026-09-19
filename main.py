@@ -1,41 +1,57 @@
-# main.py — 연평균기온에 직선을 맞추고 예측한다
+# main.py — 여러 변수로 총 관객을 예측한다
 import streamlit as st
 import pandas as pd
-import numpy as np
-import plotly.express as px
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score, mean_absolute_error
 
-DATA_URL = "https://raw.githubusercontent.com/greatsong/modudata/bb860932644270ad1199f10d3e7670e30231bce4/data/seoul.csv"
+DAILY = "https://raw.githubusercontent.com/greatsong/modudata/main/data/kobis_daily.csv"
+MOVIES = "https://raw.githubusercontent.com/greatsong/modudata/main/data/kobis_movies.csv"
 
-st.title("기온 예측기")
-
+st.header("영화 흥행 예측")
+st.caption("사후 집계 데이터를 사용한 교육용 비교입니다. 실제 개봉 전 예측 성능을 뜻하지 않습니다.")
 
 @st.cache_data
-def load_yearly():
-    df = pd.read_csv(DATA_URL)
-    df["연도"] = pd.to_datetime(df["날짜"]).dt.year
-    grouped = df.groupby("연도")["평균기온"].agg(["mean", "count"]).reset_index()
-    # 2026년 수업은 2025년까지, 유효 관측일 300일 이상인 해를 사용한다.
-    valid = (grouped["연도"] <= 2025) & (grouped["count"] >= 300)
-    return grouped[valid].rename(columns={"mean": "연평균기온"})
+def load_data():
+    daily = pd.read_csv(DAILY, dtype={"영화코드": str})
+    movies = pd.read_csv(MOVIES, dtype={"movieCd": str})
+    # 영화별 표는 일별 표에서 만들어진다. 두 표를 잇는 열은 영화코드다.
+    return daily, movies
 
+daily, movies = load_data()
+df = movies.sort_values("movieCd").reset_index(drop=True)
+# 열 편 중 앞 세 편을 테스트용으로 떼어 둔다 (누가 해도 같은 결과가 나오도록)
+is_test = df.index % 10 < 3
+train, test = df[~is_test], df[is_test]
+st.caption(f"훈련용 {len(train)}편 · 테스트용 {len(test)}편 · 전체 {len(df)}편")
+st.caption(f"기준 기간 {daily['날짜'].min()} ~ {daily['날짜'].max()} · 박스오피스 상위 10위 기록")
+st.dataframe(df.head(10))   # 표의 맨 위 열 줄
 
-yearly = load_yearly()
-yearly["1908년부터 지난 연수"] = yearly["연도"] - 1908
-a, b = np.polyfit(yearly["1908년부터 지난 연수"], yearly["연평균기온"], 1)   # 기울기, 편향
+기본 = {"첫 관측일 스크린수": "first_scrn", "첫 관측일 상영횟수": "first_show", "성수기 개봉": "peak"}
+추가 = {"첫 주 관객": "first_week_audi"}
 
-fig = px.scatter(yearly, x="연도", y="연평균기온", opacity=0.6)
-fig.add_scatter(x=yearly["연도"], y=a * yearly["1908년부터 지난 연수"] + b, mode="lines", name="회귀 직선")
-st.plotly_chart(fig, width="stretch")
-st.caption(f"직선을 만든 해: {len(yearly)}개 ({yearly['연도'].min()}~{yearly['연도'].max()}년)")
+st.subheader("변수 고르기")
+picked = [col for name, col in {**기본, **추가}.items() if st.checkbox(name, value=col in 기본.values())]
+if not picked:
+    st.warning("변수를 하나 이상 골라 주세요.")
+    st.stop()
 
-st.metric("연도와 연평균기온의 상관계수", f"{yearly['연도'].corr(yearly['연평균기온']):.3f}")
-year = st.slider("연도를 고르세요", 1900, 2100, 2045)
-st.metric(f"{year}년 예상 연평균기온", f"{a * (year - 1908) + b:.1f}℃")
-if year < yearly["연도"].min() or year > yearly["연도"].max():
-    st.info("학습 범위 밖의 외삽값입니다. 실제 미래 기온을 보장하지 않습니다.")
-# 기울기를 100년 단위로, 그리고 최근 20년과 비교
-recent = yearly[yearly["연도"] >= yearly["연도"].max() - 19]
-a2, _ = np.polyfit(recent["연도"], recent["연평균기온"], 1)
+model = LinearRegression().fit(train[picked], train["total_audi"])
+pred = model.predict(test[picked])
 c1, c2 = st.columns(2)
-c1.metric("전체 기간 기울기", f"{a * 100:+.2f}℃ / 100년")
-c2.metric("최근 20년 기울기", f"{a2 * 100:+.2f}℃ / 100년")
+c1.metric("테스트용 데이터로 평가한 점수 (R²)", f"{r2_score(test['total_audi'], pred):.3f}")
+c2.metric("평균 오차", f"{mean_absolute_error(test['total_audi'], pred):,.0f}명")
+
+import plotly.express as px
+
+바닥 = 1000
+표시 = pd.DataFrame({"실제": test["total_audi"].values, "예측": pred})
+표시["예측(표시용)"] = 표시["예측"].clip(lower=바닥)   # 음수 예측도 그래프 바닥에 남긴다
+fig = px.scatter(표시, x="실제", y="예측(표시용)", log_x=True, log_y=True,
+                 labels={"실제": "실제 총 관객 수", "예측(표시용)": "예측 총 관객 수"})
+끝 = [표시["실제"].min(), 표시["실제"].max()]
+fig.add_shape(type="line", x0=끝[0], y0=끝[0], x1=끝[1], y1=끝[1], line=dict(dash="dash"))
+st.plotly_chart(fig, use_container_width=True)
+
+낮음 = int((표시["예측"] < 바닥).sum())
+if 낮음:
+    st.caption(f"예측이 1,000명보다 작게 나온 영화 {낮음}편은 그래프 바닥에 표시했습니다. 회귀는 음수도 예측합니다.")
