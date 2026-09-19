@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -256,4 +255,3 @@ selected_actual = yearly[yearly["연도"] == selected_year]
 
 if not selected_actual.empty:
     actual_temperature = selected_
-```
