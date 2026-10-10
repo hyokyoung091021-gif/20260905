@@ -30,7 +30,7 @@ st.markdown(
     }
     div[data-testid="stMetric"] {
         background: #f4f7fb;
-        border: 1px solid #e2e8f0;
+border: 1px solid #e2e8f0;
         padding: 16px;
         border-radius: 14px;
     }
@@ -94,3 +94,54 @@ try:
     metric_columns[3].metric("stroke가 1인 비율", f"{stroke_rate:.2f}%")
 
     st.caption(
+        "※ 비율은 전체 행 수를 기준으로 계산했습니다. 데이터에 결측값이 있으면 "
+        "해당 열의 분석 결과에 영향을 줄 수 있습니다."
+    )
+
+    st.header("2. 열 정보 살펴보기")
+    st.write(
+        "‘우리말 뜻’ 열은 교재를 참고해 직접 채울 수 있도록 비워 두었습니다. "
+        "‘값의 종류’는 각 열의 자료형과 서로 다른 값의 개수를 나타냅니다."
+    )
+
+    column_info = []
+    for column in df.columns:
+        series = df[column]
+        if pd.api.types.is_numeric_dtype(series):
+            value_kind = "숫자형"
+        else:
+            value_kind = "문자형/범주형"
+
+        unique_count = int(series.nunique(dropna=True))
+        column_info.append(
+            {
+                "열 이름": column,
+                "우리말 뜻": "",
+                "값의 종류": f"{value_kind} · 고유값 {unique_count:,}개",
+                "빈 값 개수": int(series.isna().sum()),
+            }
+        )
+
+    info_df = pd.DataFrame(
+        column_info,
+        columns=["열 이름", "우리말 뜻", "값의 종류", "빈 값 개수"],
+    )
+    st.dataframe(info_df, use_container_width=True, hide_index=True)
+
+    st.header("3. 데이터 첫 5행")
+    st.write("원본 데이터의 첫 다섯 행을 표시합니다. 값은 별도로 바꾸지 않습니다.")
+    st.dataframe(df.head(5), use_container_width=True, hide_index=True)
+
+    st.header("4. 데이터 출처")
+    st.write("교재를 참고하여 데이터 출처를 직접 적어 보세요.")
+    st.text_area(
+        "데이터 출처 (직접 작성)",
+        placeholder="교재에 나온 데이터 출처를 여기에 적으세요.",
+        height=100,
+        key="data_source_note",
+    )
+
+except Exception as error:
+    st.error("데이터를 불러오거나 표시하는 중 문제가 발생했습니다.")
+    st.caption("인터넷 연결과 CSV 주소를 확인한 뒤 다시 실행해 주세요.")
+    st.exception(error)
