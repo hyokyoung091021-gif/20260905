@@ -1,3 +1,4 @@
+# main.py — 영화 유형 나누기: 속성을 골라 묶고, 묶음 수도 바꿔 가며 정한다
 import streamlit as st
 import numpy as np
 import pandas as pd
